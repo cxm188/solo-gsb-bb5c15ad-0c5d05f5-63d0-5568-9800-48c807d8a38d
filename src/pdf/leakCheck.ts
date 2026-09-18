@@ -389,7 +389,8 @@ export function applyLeakFixes(
     for (const risk of g.items) {
       bounds = unionRect(bounds, expandWithMargin(risk.rect, size.width, size.height));
     }
-    const next: RedactionBox = { id: target.id, ...bounds };
+    // 几何被修改的遮盖一律回到「待复核」，需重新人工确认
+    const next: RedactionBox = { id: target.id, ...bounds, review: 'pending' };
     const changed =
       next.x1 !== target.x1 ||
       next.y1 !== target.y1 ||

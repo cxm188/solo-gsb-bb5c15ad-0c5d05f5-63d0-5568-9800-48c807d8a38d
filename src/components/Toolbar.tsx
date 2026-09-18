@@ -13,6 +13,9 @@ interface Props {
   repeatOpen: boolean;
   leakOpen: boolean;
   orderOpen: boolean;
+  reviewOpen: boolean;
+  /** 未通过复核的遮盖数量（待复核 + 需调整），> 0 时在按钮上显示角标 */
+  reviewBlocked: number;
   /** 各页尺寸尚未收集完成时，方案导出暂不可用 */
   canUseScheme: boolean;
   onOpen(): void;
@@ -21,6 +24,7 @@ interface Props {
   onToggleRepeat(): void;
   onToggleLeak(): void;
   onToggleOrder(): void;
+  onToggleReview(): void;
   onZoomIn(): void;
   onZoomOut(): void;
   onRotate(): void;
@@ -48,6 +52,8 @@ export function Toolbar(props: Props) {
     repeatOpen,
     leakOpen,
     orderOpen,
+    reviewOpen,
+    reviewBlocked,
     canUseScheme,
   } = props;
 
@@ -109,6 +115,14 @@ export function Toolbar(props: Props) {
         title="编排导出 PDF 的页面顺序，可上移 / 下移、排除或恢复页面（不影响遮盖）"
       >
         导出页序
+      </button>
+      <button
+        className={reviewOpen ? 'active' : ''}
+        disabled={!hasDoc}
+        onClick={props.onToggleReview}
+        title="逐项或整页复核遮盖框；全部「已通过」后才能导出安全 PDF"
+      >
+        复核{reviewBlocked > 0 ? `（${reviewBlocked}）` : ''}
       </button>
 
       <div className="sep" />

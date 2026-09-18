@@ -33,7 +33,7 @@ function ti(str: string, x: number, y = 700, over: Partial<TextItem> = {}): Text
 }
 
 function box(id: string, x1: number, y1: number, x2: number, y2: number): RedactionBox {
-  return { id, x1, y1, x2, y2 };
+  return { id, x1, y1, x2, y2, review: 'pending' };
 }
 
 /** 片段：页面上的水平文本项，基线 (x,700)，字形盒约为 y∈[700-3.36, 700+12.24+pad] */
@@ -217,6 +217,19 @@ describe('批量扩展 applyLeakFixes', () => {
     expect(result.fixedBoxes).toBe(0);
     expect(result.missingBoxRisks).toBe(1);
     expect(result.map).toEqual({});
+  });
+
+  it('被扩展（几何修改）的遮盖复核状态重置为待复核，未修改的框保持原状态', () => {
+    const f = fragmentOf('ABCD', 100);
+    const approved: RedactionBox = { ...box('cover', 90, 690, 125, 720), review: 'approved' };
+    const untouched: RedactionBox = { ...box('far', 400, 100, 500, 150), review: 'approved' };
+    const pageReport = classifyPage(1, W, H, [f], [approved]);
+    const result = applyLeakFixes({ 1: [approved, untouched] }, pageReport.risks, [
+      { width: W, height: H },
+    ]);
+    expect(result.fixedBoxes).toBe(1);
+    expect(result.map[1][0].review).toBe('pending'); // 几何被修改 → 待复核
+    expect(result.map[1][1].review).toBe('approved'); // 未修改 → 状态不变
   });
 });
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjs } from './pdf/pdfjs';
-import type { FindHit, HitRect, RedactionBox, RedactionMap, Tool } from './types';
+import type { FindHit, HitRect, RedactionBox, RedactionMap, ReviewStatus, Tool } from './types';
 import { uid } from './types';
 import { useUndoable } from './state/useUndoable';
 import { exportRedactedPdf } from './pdf/exportPdf';
@@ -25,6 +25,12 @@ import {
   type LeakReport,
   type LeakRisk,
 } from './pdf/leakCheck';
+import {
+  countReview,
+  listReviewItems,
+  markReviewStatus,
+  type ReviewItem,
+} from './pdf/review';
 import type { RectCoords } from './pdf/scheme';
 import {
   buildScheme,
@@ -52,6 +58,7 @@ import { PageCanvas, type RepeatMarker } from './components/PageCanvas';
 import { FindPanel, type FindStatus } from './components/FindPanel';
 import { RepeatPanel } from './components/RepeatPanel';
 import { LeakPanel, type LeakStatus } from './components/LeakPanel';
+import { ReviewPanel } from './components/ReviewPanel';
 import { ImportDialog } from './components/ImportDialog';
 import { ExportOrderPanel } from './components/ExportOrderPanel';
 
@@ -118,6 +125,9 @@ export default function App() {
   const [orderOpen, setOrderOpen] = useState(false);
   const [pageOrder, setPageOrder] = useState<PageOrder>(() => defaultOrder(0));
 
+  // ---- 本地复核（状态保存在遮盖框上，随遮盖一起进入撤销历史） ----
+  const [reviewOpen, setReviewOpen] = useState(false);
+
   const {
     value: redactions,
     set: setRedactions,
@@ -131,6 +141,12 @@ export default function App() {
   const numPages = doc?.numPages ?? 0;
   const boxesForPage = redactions[pageNum] ?? [];
   const totalBoxes = Object.values(redactions).reduce((sum, list) => sum + list.length, 0);
+
+  // 复核统计：待复核 + 需调整的数量会硬性拦截导出（不提供绕过）
+  const reviewCounts = useMemo(() => countReview(redactions), [redactions]);
+  const reviewBlocked = reviewCounts.pending + reviewCounts.needsAdjustment;
+  /** 复核面板列表：全部未通过的遮盖框，按原始页号升序 */
+  const reviewItems = useMemo(() => listReviewItems(redactions), [redactions]);
 
   // 导出时实际处理的原始页号（按当前编排顺序、不含已排除页）
   const exportPages = useMemo(() => includedPages(pageOrder), [pageOrder]);
@@ -234,6 +250,7 @@ export default function App() {
         setLeakReport(null);
         setCheckedLeaks(new Set());
         setSelectedLeakId(null);
+        setReviewOpen(false);
         leakScanToken.current += 1;
         leakCancelToken.current += 1;
       } catch {
@@ -481,7 +498,8 @@ export default function App() {
         if (fresh.length === 0) continue;
         const pageAdds = additions.get(h.page) ?? [];
         for (const r of fresh) {
-          pageAdds.push({ id: uid(), x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 });
+          // 批量生成的遮盖框一律标记为「待复核」
+          pageAdds.push({ id: uid(), x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2, review: 'pending' });
         }
         additions.set(h.page, pageAdds);
         consumed.add(h.id);
@@ -528,6 +546,7 @@ export default function App() {
         setFindOpen(false);
         setLeakOpen(false);
         setOrderOpen(false);
+        setReviewOpen(false);
         setTool('draw');
       } else {
         setRepeatSource(null);
@@ -645,6 +664,7 @@ export default function App() {
         setFindOpen(false);
         setRepeatOpen(false);
         setOrderOpen(false);
+        setReviewOpen(false);
       } else {
         // 关闭时取消进行中的扫描，已完成的结果保留
         leakCancelToken.current += 1;
@@ -800,12 +820,60 @@ export default function App() {
         setFindOpen(false);
         setRepeatOpen(false);
         setLeakOpen(false);
+        setReviewOpen(false);
       }
       return next;
     });
   }, []);
 
   const closeOrder = useCallback(() => setOrderOpen(false), []);
+
+  // ================= 本地复核 =================
+
+  /** 打开 / 关闭复核面板：互斥于其余右侧面板 */
+  const toggleReview = useCallback(() => {
+    setReviewOpen((open) => {
+      const next = !open;
+      if (next) {
+        setFindOpen(false);
+        setRepeatOpen(false);
+        setLeakOpen(false);
+        setOrderOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const closeReview = useCallback(() => setReviewOpen(false), []);
+
+  /**
+   * 逐项 / 整页标记复核状态：整批一次 setRedactions 提交，只产生一条撤销记录；
+   * 没有实际状态变化时不提交，避免产生空的撤销记录。
+   */
+  const markReview = useCallback(
+    (ids: string[], status: ReviewStatus) => {
+      if (ids.length === 0) return;
+      const { map, changed } = markReviewStatus(redactionsRef.current, new Set(ids), status);
+      if (changed === 0) return;
+      setRedactions(map);
+    },
+    [setRedactions],
+  );
+
+  const markReviewPage = useCallback(
+    (page: number, status: ReviewStatus) => {
+      const ids = (redactionsRef.current[page] ?? []).map((b) => b.id);
+      markReview(ids, status);
+    },
+    [markReview],
+  );
+
+  /** 点击复核条目：跳页、切到选择模式并选中该遮盖框，便于就地调整 */
+  const locateReviewItem = useCallback((item: ReviewItem) => {
+    setPageNum(item.page);
+    setSelectedId(item.id);
+    setTool('select');
+  }, []);
 
   const moveOrderPage = useCallback((page: number, delta: -1 | 1) => {
     setPageOrder((order) => movePage(order, page, delta));
@@ -870,6 +938,21 @@ export default function App() {
       setError('至少保留一页参与导出，不能排除全部页面。');
       return;
     }
+    // 复核硬性拦截：仍有待复核 / 需调整的遮盖时一律拒绝导出，不提供绕过；
+    // 只有全部遮盖「已通过」才能继续。
+    if (reviewBlocked > 0) {
+      setReviewOpen(true);
+      setFindOpen(false);
+      setRepeatOpen(false);
+      setLeakOpen(false);
+      setOrderOpen(false);
+      setExportGuardArmed(false);
+      setError(
+        `导出已拦截：还有 ${reviewCounts.pending} 处遮盖待复核、${reviewCounts.needsAdjustment} 处需调整。` +
+          '请在「复核」面板逐项或整页确认，全部「已通过」后才能导出安全 PDF。',
+      );
+      return;
+    }
     // 没跑过检查、或检查结果对当前遮盖已过期（重扫时会用当前遮盖重建）时，先拦一次
     const needsScan = !leakReport || leakReport.redactions !== redactions;
     if ((needsScan || exportLeakWarning) && !exportGuardArmed) {
@@ -878,6 +961,7 @@ export default function App() {
       setFindOpen(false);
       setRepeatOpen(false);
       setOrderOpen(false);
+      setReviewOpen(false);
       if (needsScan) {
         setError('导出前请先运行「边缘泄漏检查」：没有可提取文字的页面会列为未检查，需人工确认后再导出。');
       } else {
@@ -969,8 +1053,8 @@ export default function App() {
     const scheme = pendingScheme;
     if (!scheme) return;
     const base = redactionsRef.current;
-    const { map, added, skipped } = mergeScheme(base, scheme);
-    if (added === 0) {
+    const { map, added, skipped, tightened } = mergeScheme(base, scheme);
+    if (added === 0 && tightened === 0) {
       setPendingScheme(null);
       setNotice('方案中的遮盖与现有遮盖全部重复（0.01 点容差内），未新增任何遮盖。');
       return;
@@ -979,7 +1063,10 @@ export default function App() {
     setSelectedId(null);
     setPendingScheme(null);
     setNotice(
-      `已合并导入 ${added} 处遮盖${skipped > 0 ? `，另有 ${skipped} 处重复已跳过` : ''}；可 Ctrl+Z 撤销。`,
+      `已合并导入 ${added} 处遮盖` +
+        `${skipped > 0 ? `，另有 ${skipped} 处重复已跳过` : ''}` +
+        `${tightened > 0 ? `，其中 ${tightened} 处重复框按较严格状态恢复为待复核 / 需调整` : ''}` +
+        '；可 Ctrl+Z 撤销。',
     );
   };
 
@@ -1021,6 +1108,8 @@ export default function App() {
         repeatOpen={repeatOpen}
         leakOpen={leakOpen}
         orderOpen={orderOpen}
+        reviewOpen={reviewOpen}
+        reviewBlocked={reviewBlocked}
         canUseScheme={!!doc && pageSizes.length === numPages && sourceHash.length === 64}
         onOpen={() => fileInputRef.current?.click()}
         onToolChange={setTool}
@@ -1031,6 +1120,7 @@ export default function App() {
               setRepeatOpen(false);
               setLeakOpen(false);
               setOrderOpen(false);
+              setReviewOpen(false);
             }
             return next;
           });
@@ -1038,6 +1128,7 @@ export default function App() {
         onToggleRepeat={toggleRepeat}
         onToggleLeak={toggleLeak}
         onToggleOrder={toggleOrder}
+        onToggleReview={toggleReview}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
         onRotate={() => setRotation((r) => (r + 90) % 360)}
@@ -1156,6 +1247,19 @@ export default function App() {
               onClose={closeOrder}
             />
           )}
+          {reviewOpen && (
+            <ReviewPanel
+              items={reviewItems}
+              counts={reviewCounts}
+              currentPage={pageNum}
+              selectedId={selectedId}
+              onLocate={locateReviewItem}
+              onJump={setPageNum}
+              onMarkItems={markReview}
+              onMarkPage={markReviewPage}
+              onClose={closeReview}
+            />
+          )}
         </div>
       ) : (
         <div className="empty">
@@ -1176,6 +1280,14 @@ export default function App() {
           <>
             <span>本页遮盖 {boxesForPage.length} 处</span>
             <span>全文共 {totalBoxes} 处</span>
+            {totalBoxes > 0 &&
+              (reviewBlocked > 0 ? (
+                <span>
+                  复核：待复核 {reviewCounts.pending} · 需调整 {reviewCounts.needsAdjustment}
+                </span>
+              ) : (
+                <span>复核：全部通过</span>
+              ))}
             {findOpen && totalCandidates > 0 && <span>查找候选 {totalCandidates} 处</span>}
             {leakOpen && leakReport && (
               <span>

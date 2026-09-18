@@ -813,6 +813,135 @@ button.primary {
   color: var(--text-dim);
 }
 
+/* ---------- 本地复核 ---------- */
+/* 画布上遮盖框左上角的状态点：待复核（黄）/ 需调整（橙）/ 已通过（绿） */
+.review-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.redaction-box .review-dot {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+
+.review-dot.review-pending {
+  background: #ffc700;
+}
+
+.review-dot.review-needs-adjustment {
+  background: #ff7a1a;
+}
+
+.review-dot.review-approved {
+  background: #34c759;
+}
+
+.review-summary {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.review-stat {
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-stat-pending {
+  color: #ffd95e;
+  border-color: rgba(255, 199, 0, 0.5);
+}
+
+.review-stat-adjust {
+  color: #ffab70;
+  border-color: rgba(255, 122, 26, 0.55);
+}
+
+.review-stat-approved {
+  color: #7fe0a0;
+  border-color: rgba(52, 199, 89, 0.5);
+}
+
+.review-page-actions {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.review-page-actions button {
+  flex: 1;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.review-page-actions button:hover {
+  border-color: var(--accent);
+}
+
+.review-item .review-dot {
+  margin-top: 4px;
+}
+
+.review-item.selected .find-snippet {
+  background: rgba(79, 140, 255, 0.16);
+  color: #a8c8ff;
+}
+
+.review-where {
+  display: block;
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 1px;
+}
+
+.review-item-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.review-item-actions button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.review-item-actions button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.review-item-actions .review-approve:hover:not(:disabled) {
+  border-color: #34c759;
+  color: #7fe0a0;
+}
+
+.review-item-actions .review-reject:hover:not(:disabled) {
+  border-color: #ff7a1a;
+  color: #ffab70;
+}
+
 /* ---------- 导出页序面板 ---------- */
 .order-summary {
   display: flex;
