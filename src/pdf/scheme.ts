@@ -1,8 +1,12 @@
-import type { RedactionBox, RedactionMap } from '../types';
+import type { RedactionBox, RedactionMap, ReviewStatus } from '../types';
 import { uid } from '../types';
+import { stricterReview } from './review';
 
 /**
- * 遮盖方案文件（.json）格式，版本 1。
+ * 遮盖方案文件（.json）格式，当前版本 2。
+ *
+ * 版本 2 在版本 1 的基础上为每个遮盖框增加复核状态（review）字段；
+ * 版本 1 的旧方案仍可导入，其遮盖一律按「待复核」处理。
  *
  * 方案与具体源 PDF 强绑定：导入时必须通过
  *   ① 结构校验（本文件格式 / 字段类型 / 矩形定义合法）
@@ -13,9 +17,21 @@ import { uid } from '../types';
  */
 
 export const SCHEME_FORMAT = 'pdf-redaction-scheme';
-export const SCHEME_VERSION = 1;
+export const SCHEME_VERSION = 2;
+/** 仍可导入的旧版方案号（v1 无复核状态，导入时一律视为待复核） */
+export const SCHEME_VERSION_LEGACY = 1;
 /** 合并去重的坐标容差（PDF 用户空间单位 / 点） */
 export const MERGE_TOLERANCE = 0.01;
+
+/** 方案中的一个遮盖框：页面坐标 + 复核状态 */
+export interface SchemeBox {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  /** 复核状态（v2 必填；v1 方案在解析时补为 'pending'） */
+  review: ReviewStatus;
+}
 
 export interface SchemePage {
   /** 页码，从 1 开始 */
@@ -23,12 +39,13 @@ export interface SchemePage {
   /** 未旋转页面尺寸（点），与遮盖框坐标同一坐标系 */
   width: number;
   height: number;
-  boxes: Array<{ x1: number; y1: number; x2: number; y2: number }>;
+  boxes: SchemeBox[];
 }
 
 export interface RedactionScheme {
   format: typeof SCHEME_FORMAT;
-  version: typeof SCHEME_VERSION;
+  /** 方案格式版本：2（含复核状态）或 1（旧版，无复核状态） */
+  version: number;
   /** 源 PDF 文件的 SHA-256（小写十六进制） */
   sourceHash: string;
   sourceName: string;
@@ -88,7 +105,7 @@ export function buildScheme(
       const hiY = Math.max(y1, y2);
       // 退化矩形（面积为 0）不写入方案
       if (hiX - loX <= 0 || hiY - loY <= 0) continue;
-      boxes.push({ x1: loX, y1: loY, x2: hiX, y2: hiY });
+      boxes.push({ x1: loX, y1: loY, x2: hiX, y2: hiY, review: b.review });
     }
     pages.push({ page: n, width, height, boxes });
   }
@@ -124,6 +141,11 @@ export function downloadScheme(scheme: RedactionScheme): void {
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/;
 
+const REVIEW_STATUSES: readonly ReviewStatus[] = ['pending', 'approved', 'changes-requested'];
+
+const isReviewStatus = (v: unknown): v is ReviewStatus =>
+  typeof v === 'string' && (REVIEW_STATUSES as readonly string[]).includes(v);
+
 function isRectObject(v: unknown): v is SchemePage['boxes'][number] {
   if (typeof v !== 'object' || v === null) return false;
   const r = v as Record<string, unknown>;
@@ -139,6 +161,7 @@ function isRectObject(v: unknown): v is SchemePage['boxes'][number] {
  * 解析并校验方案文件的结构（不涉及当前文档）。
  * JSON 语法错误、顶层结构错误、字段类型 / 取值错误、矩形坐标顺序错误等
  * 一律归类为 format（格式损坏）。
+ * 支持版本 2（含复核状态）与旧版 1（无复核状态，解析时补为「待复核」）。
  */
 export function parseScheme(jsonText: string): RedactionScheme {
   let raw: unknown;
@@ -156,12 +179,16 @@ export function parseScheme(jsonText: string): RedactionScheme {
   if (o.format !== SCHEME_FORMAT) {
     throw formatError('不是本工具导出的遮盖方案文件（缺少 format 标识）。');
   }
-  if (o.version !== SCHEME_VERSION) {
+  if (o.version !== SCHEME_VERSION && o.version !== SCHEME_VERSION_LEGACY) {
     if (typeof o.version === 'number') {
-      throw formatError(`方案版本 ${o.version} 不受支持（支持版本 ${SCHEME_VERSION}）。`);
+      throw formatError(
+        `方案版本 ${o.version} 不受支持（支持版本 ${SCHEME_VERSION_LEGACY}–${SCHEME_VERSION}）。`,
+      );
     }
     throw formatError('方案版本字段缺失或无效。');
   }
+  // v2 的遮盖框必须携带合法的复核状态；v1 一律按「待复核」处理
+  const withReview = o.version === SCHEME_VERSION;
   if (typeof o.sourceHash !== 'string' || !HEX_SHA256.test(o.sourceHash)) {
     throw formatError('源文件哈希字段缺失或格式无效（应为 64 位十六进制 SHA-256）。');
   }
@@ -209,7 +236,15 @@ export function parseScheme(jsonText: string): RedactionScheme {
       if (!(br.x1 < br.x2) || !(br.y1 < br.y2)) {
         throw formatError(`第 ${i + 1} 页存在宽高为 0 或坐标颠倒的遮盖框，文件已损坏。`);
       }
-      boxes.push({ x1: br.x1, y1: br.y1, x2: br.x2, y2: br.y2 });
+      let review: ReviewStatus = 'pending'; // 旧版（v1）方案的遮盖一律视为待复核
+      if (withReview) {
+        const r = (br as unknown as Record<string, unknown>).review;
+        if (!isReviewStatus(r)) {
+          throw formatError(`第 ${i + 1} 页存在复核状态缺失或无效的遮盖框，文件已损坏。`);
+        }
+        review = r;
+      }
+      boxes.push({ x1: br.x1, y1: br.y1, x2: br.x2, y2: br.y2, review });
     }
     parsedPages.push({
       page: pg.page,
@@ -221,7 +256,7 @@ export function parseScheme(jsonText: string): RedactionScheme {
 
   return {
     format: SCHEME_FORMAT,
-    version: SCHEME_VERSION,
+    version: o.version as number,
     sourceHash: o.sourceHash,
     sourceName: o.sourceName,
     numPages: o.numPages,
@@ -314,43 +349,55 @@ export function sameRectWithinTolerance(a: RectCoords, b: RectCoords): boolean {
  * “合并”：保留现有遮盖，追加方案中的遮盖；
  * 按页去重：与同页任一已有矩形在四个坐标上的差值都不超过 MERGE_TOLERANCE（0.01 点）
  * 即视为重复并跳过（方案内部彼此重复的矩形也一并去重）。
+ * 坐标重复的框不新增，但其复核状态按「保留较严格状态」合并
+ * （需调整 > 待复核 > 已通过，只会变严、不会放宽）。
  */
 export function mergeScheme(
   base: RedactionMap,
   scheme: RedactionScheme,
-): { map: RedactionMap; added: number; skipped: number } {
+): { map: RedactionMap; added: number; skipped: number; tightened: number } {
   const map: RedactionMap = {};
-  // 每页已保留的矩形（现有 + 本次新增），用于容差去重
-  const rectsByPage = new Map<number, SchemePage['boxes']>();
+  // 每页已保留的框（现有 + 本次新增），用于容差去重与重复框状态合并
+  const knownByPage = new Map<number, RedactionBox[]>();
   let added = 0;
   let skipped = 0;
+  let tightened = 0;
 
   for (const key of Object.keys(base)) {
     const n = Number(key);
-    const boxes = base[n] ?? [];
-    map[n] = boxes.map((b) => ({ ...b }));
-    rectsByPage.set(n, boxes.map((b) => ({ x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 })));
+    const boxes = (base[n] ?? []).map((b) => ({ ...b }));
+    map[n] = boxes;
+    // 去重索引与 map 中的列表是两个数组（共享框对象，便于收紧状态时同步生效）
+    knownByPage.set(n, [...boxes]);
   }
 
   for (const sp of scheme.pages) {
-    const known = rectsByPage.get(sp.page) ?? [];
+    const known = knownByPage.get(sp.page) ?? [];
     const list = map[sp.page] ?? [];
     for (const b of sp.boxes) {
-      if (known.some((k) => sameRectWithinTolerance(k, b))) {
+      const dup = known.find((k) => sameRectWithinTolerance(k, b));
+      if (dup) {
         skipped += 1;
+        // 重复框保留较严格的复核状态（只收紧，不放宽）
+        const stricter = stricterReview(dup.review, b.review);
+        if (stricter !== dup.review) {
+          dup.review = stricter;
+          tightened += 1;
+        }
         continue;
       }
-      known.push(b);
-      list.push({ id: uid(), ...b });
+      const box: RedactionBox = { id: uid(), x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, review: b.review };
+      known.push(box);
+      list.push(box);
       added += 1;
     }
     if (list.length > 0) {
       map[sp.page] = list;
-      rectsByPage.set(sp.page, known);
+      knownByPage.set(sp.page, known);
     }
   }
 
-  return { map, added, skipped };
+  return { map, added, skipped, tightened };
 }
 
 /** 方案中遮盖框总数（用于导入确认提示） */

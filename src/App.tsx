@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjs } from './pdf/pdfjs';
-import type { FindHit, HitRect, RedactionBox, RedactionMap, Tool } from './types';
+import type { FindHit, HitRect, RedactionBox, RedactionMap, ReviewStatus, Tool } from './types';
 import { uid } from './types';
 import { useUndoable } from './state/useUndoable';
 import { exportRedactedPdf } from './pdf/exportPdf';
+import {
+  collectReviewItems,
+  countReview,
+  markReview,
+  reviewBlockers,
+} from './pdf/review';
 import {
   PageText,
   parseQueries,
@@ -35,6 +41,7 @@ import {
   schemeToRedactionMap,
   validateSchemeMatch,
   SchemeError,
+  SCHEME_VERSION,
   type RedactionScheme,
 } from './pdf/scheme';
 import { sha256Hex } from './pdf/sha256';
@@ -54,6 +61,7 @@ import { RepeatPanel } from './components/RepeatPanel';
 import { LeakPanel, type LeakStatus } from './components/LeakPanel';
 import { ImportDialog } from './components/ImportDialog';
 import { ExportOrderPanel } from './components/ExportOrderPanel';
+import { ReviewPanel } from './components/ReviewPanel';
 
 const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
@@ -118,6 +126,9 @@ export default function App() {
   const [orderOpen, setOrderOpen] = useState(false);
   const [pageOrder, setPageOrder] = useState<PageOrder>(() => defaultOrder(0));
 
+  // ---- 本地复核（状态存在每个遮盖框上，随遮盖进入撤销历史与遮盖方案） ----
+  const [reviewOpen, setReviewOpen] = useState(false);
+
   const {
     value: redactions,
     set: setRedactions,
@@ -131,6 +142,11 @@ export default function App() {
   const numPages = doc?.numPages ?? 0;
   const boxesForPage = redactions[pageNum] ?? [];
   const totalBoxes = Object.values(redactions).reduce((sum, list) => sum + list.length, 0);
+
+  // 复核统计：待复核 + 需调整会拦截导出（不可绕过）
+  const reviewCounts = useMemo(() => countReview(redactions), [redactions]);
+  const reviewBlockerCount = useMemo(() => reviewBlockers(redactions), [redactions]);
+  const reviewGroups = useMemo(() => collectReviewItems(redactions), [redactions]);
 
   // 导出时实际处理的原始页号（按当前编排顺序、不含已排除页）
   const exportPages = useMemo(() => includedPages(pageOrder), [pageOrder]);
@@ -234,6 +250,7 @@ export default function App() {
         setLeakReport(null);
         setCheckedLeaks(new Set());
         setSelectedLeakId(null);
+        setReviewOpen(false);
         leakScanToken.current += 1;
         leakCancelToken.current += 1;
       } catch {
@@ -317,12 +334,16 @@ export default function App() {
   };
 
   const addBox = (box: RedactionBox) => {
-    mutatePage(pageNum, (boxes) => [...boxes, box]);
+    // 新建遮盖一律标记为「待复核」
+    mutatePage(pageNum, (boxes) => [...boxes, { ...box, review: 'pending' }]);
     setSelectedId(box.id);
   };
 
   const changeBox = (box: RedactionBox) => {
-    mutatePage(pageNum, (boxes) => boxes.map((b) => (b.id === box.id ? box : b)));
+    // 几何被修改的遮盖（含「需调整」项）自动回到「待复核」
+    mutatePage(pageNum, (boxes) =>
+      boxes.map((b) => (b.id === box.id ? { ...box, review: 'pending' } : b)),
+    );
   };
 
   const deleteBox = (id: string) => {
@@ -481,7 +502,8 @@ export default function App() {
         if (fresh.length === 0) continue;
         const pageAdds = additions.get(h.page) ?? [];
         for (const r of fresh) {
-          pageAdds.push({ id: uid(), x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 });
+          // 批量生成的遮盖同样从「待复核」开始
+          pageAdds.push({ id: uid(), x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2, review: 'pending' });
         }
         additions.set(h.page, pageAdds);
         consumed.add(h.id);
@@ -528,6 +550,7 @@ export default function App() {
         setFindOpen(false);
         setLeakOpen(false);
         setOrderOpen(false);
+        setReviewOpen(false);
         setTool('draw');
       } else {
         setRepeatSource(null);
@@ -645,6 +668,7 @@ export default function App() {
         setFindOpen(false);
         setRepeatOpen(false);
         setOrderOpen(false);
+        setReviewOpen(false);
       } else {
         // 关闭时取消进行中的扫描，已完成的结果保留
         leakCancelToken.current += 1;
@@ -800,6 +824,7 @@ export default function App() {
         setFindOpen(false);
         setRepeatOpen(false);
         setLeakOpen(false);
+        setReviewOpen(false);
       }
       return next;
     });
@@ -826,6 +851,43 @@ export default function App() {
 
   const resetOrder = useCallback(() => {
     setPageOrder((order) => defaultOrder(order.ordered.length));
+  }, []);
+
+  // ================= 本地复核 =================
+
+  /** 打开 / 关闭复核面板：互斥于其余右侧面板 */
+  const toggleReview = useCallback(() => {
+    setReviewOpen((open) => {
+      const next = !open;
+      if (next) {
+        setFindOpen(false);
+        setRepeatOpen(false);
+        setLeakOpen(false);
+        setOrderOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const closeReview = useCallback(() => setReviewOpen(false), []);
+
+  /**
+   * 逐项 / 整页标记复核状态：无论涉及多少框，整批只提交一次 setRedactions，
+   * 因此只有一条撤销记录。
+   */
+  const applyReview = useCallback(
+    (ids: string[], status: ReviewStatus) => {
+      const { map, changed } = markReview(redactionsRef.current, new Set(ids), status);
+      if (changed > 0) setRedactions(map);
+    },
+    [setRedactions],
+  );
+
+  /** 点击复核条目：跳到该原始页、切到选择模式并选中对应遮盖框 */
+  const locateReviewBox = useCallback((page: number, boxId: string) => {
+    setPageNum(page);
+    setSelectedId(boxId);
+    setTool('select');
   }, []);
 
   const zoomIn = () => setZoom((z) => ZOOM_LEVELS.find((l) => l > z + 0.001) ?? ZOOM_LEVELS[ZOOM_LEVELS.length - 1]);
@@ -868,6 +930,19 @@ export default function App() {
     // 不允许排除全部页面（正常流程按钮已拦截，这里再兜底）
     if (exportPages.length === 0) {
       setError('至少保留一页参与导出，不能排除全部页面。');
+      return;
+    }
+    // 复核拦截（不可绕过）：仍有待复核 / 需调整的遮盖时一律拒绝导出并展示数量
+    if (reviewBlockerCount > 0) {
+      setReviewOpen(true);
+      setFindOpen(false);
+      setRepeatOpen(false);
+      setLeakOpen(false);
+      setOrderOpen(false);
+      setError(
+        `导出已拦截：还有 ${reviewCounts.pending} 处待复核、${reviewCounts.changesRequested} 处需调整的遮盖框。` +
+          '请在「复核」面板逐项或整页标记「已通过」，全部通过后才能导出（此拦截不可跳过）。',
+      );
       return;
     }
     // 没跑过检查、或检查结果对当前遮盖已过期（重扫时会用当前遮盖重建）时，先拦一次
@@ -958,19 +1033,22 @@ export default function App() {
   const applyImportReplace = () => {
     const scheme = pendingScheme;
     if (!scheme) return;
-    // 一次 set 即一条撤销记录
+    // 一次 set 即一条撤销记录；复核状态随方案恢复（v1 旧方案一律为待复核）
     setRedactions(schemeToRedactionMap(scheme));
     setSelectedId(null);
     setPendingScheme(null);
-    setNotice(`已用方案替换当前遮盖，共 ${countSchemeBoxes(scheme)} 处；可 Ctrl+Z 撤销。`);
+    setNotice(
+      `已用方案替换当前遮盖，共 ${countSchemeBoxes(scheme)} 处` +
+        `${scheme.version < SCHEME_VERSION ? '（旧版方案：全部标记为待复核）' : '（复核状态已随方案恢复）'}；可 Ctrl+Z 撤销。`,
+    );
   };
 
   const applyImportMerge = () => {
     const scheme = pendingScheme;
     if (!scheme) return;
     const base = redactionsRef.current;
-    const { map, added, skipped } = mergeScheme(base, scheme);
-    if (added === 0) {
+    const { map, added, skipped, tightened } = mergeScheme(base, scheme);
+    if (added === 0 && tightened === 0) {
       setPendingScheme(null);
       setNotice('方案中的遮盖与现有遮盖全部重复（0.01 点容差内），未新增任何遮盖。');
       return;
@@ -979,7 +1057,9 @@ export default function App() {
     setSelectedId(null);
     setPendingScheme(null);
     setNotice(
-      `已合并导入 ${added} 处遮盖${skipped > 0 ? `，另有 ${skipped} 处重复已跳过` : ''}；可 Ctrl+Z 撤销。`,
+      `已合并导入 ${added} 处遮盖` +
+        `${skipped > 0 ? `，${skipped} 处重复已跳过` : ''}` +
+        `${tightened > 0 ? `，其中 ${tightened} 处重复框按较严格状态更新复核标记` : ''}；可 Ctrl+Z 撤销。`,
     );
   };
 
@@ -1021,6 +1101,8 @@ export default function App() {
         repeatOpen={repeatOpen}
         leakOpen={leakOpen}
         orderOpen={orderOpen}
+        reviewOpen={reviewOpen}
+        reviewBlockers={reviewBlockerCount}
         canUseScheme={!!doc && pageSizes.length === numPages && sourceHash.length === 64}
         onOpen={() => fileInputRef.current?.click()}
         onToolChange={setTool}
@@ -1031,6 +1113,7 @@ export default function App() {
               setRepeatOpen(false);
               setLeakOpen(false);
               setOrderOpen(false);
+              setReviewOpen(false);
             }
             return next;
           });
@@ -1038,6 +1121,7 @@ export default function App() {
         onToggleRepeat={toggleRepeat}
         onToggleLeak={toggleLeak}
         onToggleOrder={toggleOrder}
+        onToggleReview={toggleReview}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
         onRotate={() => setRotation((r) => (r + 90) % 360)}
@@ -1156,6 +1240,18 @@ export default function App() {
               onClose={closeOrder}
             />
           )}
+          {reviewOpen && (
+            <ReviewPanel
+              groups={reviewGroups}
+              counts={reviewCounts}
+              currentPage={pageNum}
+              selectedId={selectedId}
+              onLocate={locateReviewBox}
+              onMark={applyReview}
+              onJump={setPageNum}
+              onClose={closeReview}
+            />
+          )}
         </div>
       ) : (
         <div className="empty">
@@ -1176,6 +1272,12 @@ export default function App() {
           <>
             <span>本页遮盖 {boxesForPage.length} 处</span>
             <span>全文共 {totalBoxes} 处</span>
+            {totalBoxes > 0 && (
+              <span>
+                复核：待复核 {reviewCounts.pending} · 需调整 {reviewCounts.changesRequested} ·
+                已通过 {reviewCounts.approved}
+              </span>
+            )}
             {findOpen && totalCandidates > 0 && <span>查找候选 {totalCandidates} 处</span>}
             {leakOpen && leakReport && (
               <span>

@@ -122,7 +122,7 @@ describe('buildRepeatPlan', () => {
   it('逐页给出映射矩形并标记重复', () => {
     const redactions: RedactionMap = {
       // 第 2 页已存在与映射结果 0.01 点容差内相同的框
-      2: [{ id: 'x', ...expectedOnPage2() }],
+      2: [{ id: 'x', ...expectedOnPage2(), review: 'pending' }],
     };
     const plan = buildRepeatPlan(source, [1, 2, 3], SIZES, redactions);
     expect(plan.previews).toHaveLength(3);
@@ -156,8 +156,8 @@ describe('applyRepeatPlan', () => {
   it('一次批量加入，跳过重复页与退化页', () => {
     const existing = mapRectToPage(source.rect, SIZES[0], SIZES[1])!;
     const redactions: RedactionMap = {
-      2: [{ id: 'keep', ...existing }],
-      9: [{ id: 'untouched', x1: 1, y1: 1, x2: 2, y2: 2 }],
+      2: [{ id: 'keep', ...existing, review: 'approved' }],
+      9: [{ id: 'untouched', x1: 1, y1: 1, x2: 2, y2: 2, review: 'approved' }],
     };
     // 源区域对第 3 页映射有效；构造一个对第 3 页退化（null）的区域
     const beyond: RepeatSource = {
@@ -174,8 +174,12 @@ describe('applyRepeatPlan', () => {
     expect(resultA.map[9]).toEqual(redactions[9]);
     expect(resultA.map[2]).toHaveLength(1);
     expect(resultA.map[2][0].id).toBe('keep');
+    expect(resultA.map[2][0].review).toBe('approved'); // 已有框状态不变
     expect(resultA.map[1]).toHaveLength(1);
     expect(resultA.map[3]).toHaveLength(1);
+    // 批量生成的新框一律从「待复核」开始
+    expect(resultA.map[1][0].review).toBe('pending');
+    expect(resultA.map[3][0].review).toBe('pending');
 
     const planB = buildRepeatPlan(beyond, [3], SIZES, redactions);
     const resultB = applyRepeatPlan(redactions, planB, nextId);
@@ -194,6 +198,7 @@ describe('applyRepeatPlan', () => {
           y1: base.y1 - 0.005,
           x2: base.x2 + 0.01,
           y2: base.y2,
+          review: 'pending',
         },
       ],
     };
@@ -207,7 +212,7 @@ describe('applyRepeatPlan', () => {
   it('超过 0.01 点容差则不跳过', () => {
     const base = mapRectToPage(source.rect, SIZES[0], SIZES[1])!;
     const redactions: RedactionMap = {
-      2: [{ id: 'far', ...base, x2: base.x2 + 0.02 }],
+      2: [{ id: 'far', ...base, x2: base.x2 + 0.02, review: 'pending' }],
     };
     const plan = buildRepeatPlan(source, [2], SIZES, redactions);
     expect(plan.previews[0].duplicate).toBe(false);

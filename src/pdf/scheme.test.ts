@@ -10,6 +10,7 @@ import {
   validateSchemeMatch,
   SCHEME_FORMAT,
   SCHEME_VERSION,
+  SCHEME_VERSION_LEGACY,
   SchemeError,
 } from './scheme';
 import type { RedactionMap } from '../types';
@@ -21,10 +22,10 @@ const SIZES = [
 ];
 
 const redactions: RedactionMap = {
-  1: [{ id: 'b1', x1: 10, y1: 20, x2: 110, y2: 70 }],
+  1: [{ id: 'b1', x1: 10, y1: 20, x2: 110, y2: 70, review: 'pending' }],
   2: [
-    { id: 'b2', x1: 0, y1: 0, x2: 50, y2: 50 },
-    { id: 'b3', x1: 100.5, y1: 300.25, x2: 200, y2: 400 },
+    { id: 'b2', x1: 0, y1: 0, x2: 50, y2: 50, review: 'approved' },
+    { id: 'b3', x1: 100.5, y1: 300.25, x2: 200, y2: 400, review: 'changes-requested' },
   ],
 };
 
@@ -40,7 +41,7 @@ describe('buildScheme / 序列化往返', () => {
       { width: 100, height: 200 },
       { width: 100, height: 200 },
       { width: 100, height: 200 },
-    ], { 2: [{ id: 'a', x1: 1, y1: 1, x2: 2, y2: 2 }] });
+    ], { 2: [{ id: 'a', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' }] });
     expect(s.pages.map((p) => p.page)).toEqual([1, 2, 3]);
     expect(s.pages[0].boxes).toEqual([]);
     expect(s.pages[2].boxes).toEqual([]);
@@ -54,19 +55,31 @@ describe('buildScheme / 序列化往返', () => {
   it('越界坐标被夹回页面范围，退化矩形不写入', () => {
     const map: RedactionMap = {
       1: [
-        { id: 'ok', x1: -5, y1: 10, x2: 700, y2: 500 }, // 夹到 [0,10]-[612,500]
-        { id: 'degenerate', x1: 10, y1: 10, x2: 10, y2: 40 }, // 宽 0，丢弃
+        { id: 'ok', x1: -5, y1: 10, x2: 700, y2: 500, review: 'pending' }, // 夹到 [0,10]-[612,500]
+        { id: 'degenerate', x1: 10, y1: 10, x2: 10, y2: 40, review: 'pending' }, // 宽 0，丢弃
       ],
     };
     const s = buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], map);
-    expect(s.pages[0].boxes).toEqual([{ x1: 0, y1: 10, x2: 612, y2: 500 }]);
+    expect(s.pages[0].boxes).toEqual([{ x1: 0, y1: 10, x2: 612, y2: 500, review: 'pending' }]);
   });
 
-  it('序列化后可无损解析，矩形坐标一致', () => {
+  it('序列化后可无损解析，矩形坐标与复核状态一致', () => {
     const s = parse(build());
-    expect(s.pages[0].boxes).toEqual([{ x1: 10, y1: 20, x2: 110, y2: 70 }]);
+    expect(s.pages[0].boxes).toEqual([{ x1: 10, y1: 20, x2: 110, y2: 70, review: 'pending' }]);
     expect(s.pages[1].boxes).toHaveLength(2);
+    expect(s.pages[1].boxes[0].review).toBe('approved');
+    expect(s.pages[1].boxes[1].review).toBe('changes-requested');
     expect(countSchemeBoxes(s)).toBe(3);
+  });
+
+  it('v2 方案为每个遮盖框写入复核状态', () => {
+    const s = build();
+    expect(s.version).toBe(2);
+    for (const p of s.pages) {
+      for (const b of p.boxes) {
+        expect(['pending', 'approved', 'changes-requested']).toContain(b.review);
+      }
+    }
   });
 });
 
@@ -103,6 +116,8 @@ describe('parseScheme 结构校验（格式损坏）', () => {
   it('版本不支持', () => {
     const s = build() as unknown as Record<string, unknown>;
     s.version = 99;
+    expectFormatError(JSON.stringify(s), '版本');
+    s.version = 0;
     expectFormatError(JSON.stringify(s), '版本');
   });
 
@@ -152,6 +167,46 @@ describe('parseScheme 结构校验（格式损坏）', () => {
       expectFormatError(JSON.stringify(broken));
     }
   });
+
+  it('v2 方案中复核状态缺失或非法均拒绝', () => {
+    const noReview = JSON.parse(JSON.stringify(build()));
+    delete noReview.pages[0].boxes[0].review;
+    expectFormatError(JSON.stringify(noReview), '复核状态');
+
+    const badReview = JSON.parse(JSON.stringify(build()));
+    badReview.pages[0].boxes[0].review = 'looks-good';
+    expectFormatError(JSON.stringify(badReview), '复核状态');
+  });
+});
+
+describe('parseScheme 旧版（v1）兼容', () => {
+  /** 构造一个 v1 方案：无复核状态字段 */
+  const buildV1 = () => ({
+    format: SCHEME_FORMAT,
+    version: SCHEME_VERSION_LEGACY,
+    sourceHash: HASH,
+    sourceName: 'old.pdf',
+    numPages: 2,
+    pages: [
+      { page: 1, width: 612, height: 792, boxes: [{ x1: 10, y1: 20, x2: 110, y2: 70 }] },
+      { page: 2, width: 792, height: 612, boxes: [] },
+    ],
+    exportedAt: new Date().toISOString(),
+  });
+
+  it('v1 方案可以导入，遮盖一律标记为待复核', () => {
+    const s = parseScheme(JSON.stringify(buildV1()));
+    expect(s.version).toBe(SCHEME_VERSION_LEGACY);
+    expect(s.pages[0].boxes).toHaveLength(1);
+    expect(s.pages[0].boxes[0].review).toBe('pending');
+    const map = schemeToRedactionMap(s);
+    expect(map[1][0].review).toBe('pending');
+  });
+
+  it('v1 方案通过文档匹配校验', () => {
+    const s = parseScheme(JSON.stringify(buildV1()));
+    expect(() => validateSchemeMatch(s, HASH, SIZES)).not.toThrow();
+  });
 });
 
 describe('validateSchemeMatch 文档匹配', () => {
@@ -194,14 +249,14 @@ describe('validateSchemeMatch 文档匹配', () => {
 
   it('矩形超出页面边界（结构合法但文档不匹配）', () => {
     const s = build();
-    s.pages[0].boxes.push({ x1: 10, y1: 10, x2: 612.5, y2: 50 });
+    s.pages[0].boxes.push({ x1: 10, y1: 10, x2: 612.5, y2: 50, review: 'pending' });
     // 超出 0.01 容差
     expectMismatch(s, HASH, SIZES, '边界');
   });
 
   it('矩形仅越界 0.01 点容差以内仍通过', () => {
     const s = build();
-    s.pages[0].boxes.push({ x1: 0, y1: 0, x2: 612 + MERGE_TOLERANCE, y2: 50 });
+    s.pages[0].boxes.push({ x1: 0, y1: 0, x2: 612 + MERGE_TOLERANCE, y2: 50, review: 'pending' });
     expect(() => validateSchemeMatch(s, HASH, SIZES)).not.toThrow();
   });
 
@@ -225,7 +280,7 @@ describe('validateSchemeMatch 文档匹配', () => {
 });
 
 describe('应用方案：替换', () => {
-  it('替换后只包含方案中的遮盖，且 id 全部重新生成', () => {
+  it('替换后只包含方案中的遮盖，id 全部重新生成，复核状态随方案恢复', () => {
     const s = parse(build());
     const map = schemeToRedactionMap(s);
     expect(Object.keys(map).sort()).toEqual(['1', '2']);
@@ -233,6 +288,9 @@ describe('应用方案：替换', () => {
     expect(map[2]).toHaveLength(2);
     expect(map[1][0].id).not.toBe('b1');
     expect(map[2][0].x1).toBe(0);
+    expect(map[1][0].review).toBe('pending');
+    expect(map[2][0].review).toBe('approved');
+    expect(map[2][1].review).toBe('changes-requested');
   });
 
   it('空方案替换为空 map', () => {
@@ -244,24 +302,27 @@ describe('应用方案：替换', () => {
 describe('应用方案：合并去重（按页，容差 0.01）', () => {
   it('无重复时全部追加，现有遮盖保持不变', () => {
     const s = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
-      1: [{ id: 'in', x1: 300, y1: 300, x2: 400, y2: 400 }],
+      1: [{ id: 'in', x1: 300, y1: 300, x2: 400, y2: 400, review: 'pending' }],
     }));
     const base: RedactionMap = {
-      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60, review: 'approved' }],
     };
-    const { map, added, skipped } = mergeScheme(base, s);
+    const { map, added, skipped, tightened } = mergeScheme(base, s);
     expect(added).toBe(1);
     expect(skipped).toBe(0);
+    expect(tightened).toBe(0);
     expect(map[1]).toHaveLength(2);
     expect(map[1][0].id).toBe('old');
+    expect(map[1][0].review).toBe('approved');
+    expect(map[1][1].review).toBe('pending');
   });
 
   it('坐标完全相同的矩形按页去重', () => {
     const s = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
-      1: [{ id: 'dup', x1: 10, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'dup', x1: 10, y1: 10, x2: 60, y2: 60, review: 'pending' }],
     }));
     const base: RedactionMap = {
-      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60, review: 'pending' }],
     };
     const { map, added, skipped } = mergeScheme(base, s);
     expect(added).toBe(0);
@@ -272,29 +333,29 @@ describe('应用方案：合并去重（按页，容差 0.01）', () => {
 
   it('四角差值均在 0.01 容差内视为重复；任一坐标超出即保留', () => {
     const near: RedactionMap = {
-      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60, review: 'pending' }],
     };
     const sNear = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
-      1: [{ id: 'in', x1: 10.009, y1: 9.999, x2: 60.01, y2: 59.995 }],
+      1: [{ id: 'in', x1: 10.009, y1: 9.999, x2: 60.01, y2: 59.995, review: 'pending' }],
     }));
     expect(mergeScheme(near, sNear).added).toBe(0);
 
     const far: RedactionMap = {
-      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60, review: 'pending' }],
     };
     const sFar = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
-      1: [{ id: 'in', x1: 10.02, y1: 10, x2: 60, y2: 60 }],
+      1: [{ id: 'in', x1: 10.02, y1: 10, x2: 60, y2: 60, review: 'pending' }],
     }));
     expect(mergeScheme(far, sFar).added).toBe(1);
   });
 
   it('去重按页进行：不同页上相同坐标不算重复', () => {
     const s = parse(buildScheme(HASH, 'x.pdf', 2, SIZES, {
-      1: [{ id: 'a', x1: 1, y1: 1, x2: 2, y2: 2 }],
-      2: [{ id: 'b', x1: 1, y1: 1, x2: 2, y2: 2 }],
+      1: [{ id: 'a', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' }],
+      2: [{ id: 'b', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' }],
     }));
     const base: RedactionMap = {
-      1: [{ id: 'old', x1: 1, y1: 1, x2: 2, y2: 2 }],
+      1: [{ id: 'old', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' }],
     };
     const { map, added, skipped } = mergeScheme(base, s);
     expect(added).toBe(1);
@@ -306,8 +367,8 @@ describe('应用方案：合并去重（按页，容差 0.01）', () => {
   it('方案内部彼此重复的矩形也只保留一个', () => {
     const s = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
       1: [
-        { id: 'a', x1: 1, y1: 1, x2: 2, y2: 2 },
-        { id: 'b', x1: 1, y1: 1, x2: 2, y2: 2 },
+        { id: 'a', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' },
+        { id: 'b', x1: 1, y1: 1, x2: 2, y2: 2, review: 'pending' },
       ],
     }));
     // buildScheme 不过滤重复（导出时保留），合并时去重
@@ -318,13 +379,62 @@ describe('应用方案：合并去重（按页，容差 0.01）', () => {
 
   it('不修改输入的现有 map（不可变更新，支撑撤销）', () => {
     const s = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
-      1: [{ id: 'in', x1: 9, y1: 9, x2: 99, y2: 99 }],
+      1: [{ id: 'in', x1: 9, y1: 9, x2: 99, y2: 99, review: 'changes-requested' }],
     }));
     const base: RedactionMap = {
-      1: [{ id: 'old', x1: 1, y1: 1, x2: 2, y2: 2 }],
+      1: [{ id: 'old', x1: 1, y1: 1, x2: 2, y2: 2, review: 'approved' }],
     };
     const snapshot = JSON.stringify(base);
     mergeScheme(base, s);
     expect(JSON.stringify(base)).toBe(snapshot);
+  });
+});
+
+describe('合并时重复框保留较严格的复核状态', () => {
+  const baseWith = (review: 'pending' | 'approved' | 'changes-requested'): RedactionMap => ({
+    1: [{ id: 'old', x1: 10, y1: 10, x2: 60, y2: 60, review }],
+  });
+  const schemeWith = (review: 'pending' | 'approved' | 'changes-requested') =>
+    parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
+      1: [{ id: 'in', x1: 10, y1: 10, x2: 60, y2: 60, review }],
+    }));
+
+  it('现有已通过 + 方案待复核 → 收紧为待复核', () => {
+    const { map, added, skipped, tightened } = mergeScheme(baseWith('approved'), schemeWith('pending'));
+    expect(added).toBe(0);
+    expect(skipped).toBe(1);
+    expect(tightened).toBe(1);
+    expect(map[1][0].review).toBe('pending');
+  });
+
+  it('现有待复核 + 方案需调整 → 收紧为需调整', () => {
+    const { map, tightened } = mergeScheme(baseWith('pending'), schemeWith('changes-requested'));
+    expect(tightened).toBe(1);
+    expect(map[1][0].review).toBe('changes-requested');
+  });
+
+  it('现有需调整 + 方案已通过 → 保持需调整（不会放宽）', () => {
+    const { map, tightened } = mergeScheme(baseWith('changes-requested'), schemeWith('approved'));
+    expect(tightened).toBe(0);
+    expect(map[1][0].review).toBe('changes-requested');
+  });
+
+  it('现有已通过 + 方案已通过 → 保持已通过', () => {
+    const { map, tightened } = mergeScheme(baseWith('approved'), schemeWith('approved'));
+    expect(tightened).toBe(0);
+    expect(map[1][0].review).toBe('approved');
+  });
+
+  it('方案内部重复框也按较严格状态合并', () => {
+    const s = parse(buildScheme(HASH, 'x.pdf', 1, [SIZES[0]], {
+      1: [
+        { id: 'a', x1: 1, y1: 1, x2: 2, y2: 2, review: 'approved' },
+        { id: 'b', x1: 1, y1: 1, x2: 2, y2: 2, review: 'changes-requested' },
+      ],
+    }));
+    const { map, added, tightened } = mergeScheme({}, s);
+    expect(added).toBe(1);
+    expect(tightened).toBe(1);
+    expect(map[1][0].review).toBe('changes-requested');
   });
 });

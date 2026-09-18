@@ -187,7 +187,7 @@ export function PageCanvas({
     };
   };
 
-  /** 视口矩形 -> 页面坐标（用于保存） */
+  /** 视口矩形 -> 页面坐标（用于保存）；新建 / 几何修改的框一律回到「待复核」 */
   const rectToBox = (r: Rect, id: string): RedactionBox => {
     const [ax, ay] = viewport.convertToPdfPoint(r.left, r.top);
     const [bx, by] = viewport.convertToPdfPoint(r.left + r.width, r.top + r.height);
@@ -197,6 +197,7 @@ export function PageCanvas({
       y1: Math.min(ay, by),
       x2: Math.max(ax, bx),
       y2: Math.max(ay, by),
+      review: 'pending',
     };
   };
 
@@ -317,13 +318,25 @@ export function PageCanvas({
           const r = draft && draft.id === b.id ? draft.rect : boxToRect(b);
           const selected = b.id === selectedId;
           const leakLinked = leakLinkedIds.has(b.id);
+          const reviewClass =
+            b.review === 'pending'
+              ? ' review-pending'
+              : b.review === 'changes-requested'
+                ? ' review-changes'
+                : '';
+          const reviewHint =
+            b.review === 'pending' ? '（待复核）' : b.review === 'changes-requested' ? '（需调整）' : '';
           return (
             <div
               key={b.id}
-              className={`redaction-box${selected ? ' selected' : ''}${leakLinked ? ' leak-linked' : ''}`}
+              className={`redaction-box${selected ? ' selected' : ''}${leakLinked ? ' leak-linked' : ''}${reviewClass}`}
               style={{ left: r.left, top: r.top, width: r.width, height: r.height }}
               onPointerDown={(e) => startMove(e, b)}
-              title={leakLinked ? '与边缘泄漏风险关联的遮盖' : '遮盖区域'}
+              title={
+                leakLinked
+                  ? `与边缘泄漏风险关联的遮盖${reviewHint}`
+                  : `遮盖区域${reviewHint}`
+              }
             >
               {selected &&
                 tool === 'select' &&

@@ -1,4 +1,12 @@
 /**
+ * 遮盖框的本地复核状态：
+ * - pending：待复核——每个新建、批量生成或几何被修改的遮盖框都进入该状态；
+ * - approved：已通过——复核确认无误；只有全部遮盖都通过才允许导出安全 PDF；
+ * - changes-requested：需调整——复核发现问题的标记；几何被修改后自动回到 pending。
+ */
+export type ReviewStatus = 'pending' | 'approved' | 'changes-requested';
+
+/**
  * 遮盖框以 PDF 页面坐标（用户空间单位，1 单位 = 1/72 英寸，原点为页面左下角，
  * 基于未旋转的页面）保存，因此缩放、旋转、切换页面后位置不会漂移。
  */
@@ -9,6 +17,8 @@ export interface RedactionBox {
   y1: number;
   x2: number;
   y2: number;
+  /** 复核状态：随遮盖一并进入撤销历史，并写入遮盖方案（v2） */
+  review: ReviewStatus;
 }
 
 /** 页码（从 1 开始） -> 该页的遮盖框列表 */

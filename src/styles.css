@@ -236,6 +236,15 @@ button.primary {
   cursor: move;
 }
 
+/* 复核状态：待复核为琥珀色虚线，需调整为橙色虚线（已通过保持默认样式） */
+.redaction-box.review-pending {
+  border: 1px dashed rgba(255, 199, 0, 0.95);
+}
+
+.redaction-box.review-changes {
+  border: 2px dashed #ff7a45;
+}
+
 .redaction-box.selected {
   border: 2px solid var(--danger);
   background: rgba(10, 10, 14, 0.6);
@@ -941,6 +950,114 @@ button.primary {
 .order-controls button.danger-outline:hover {
   background: #4a1d1d;
   border-color: var(--danger);
+}
+
+/* ---------- 复核面板 ---------- */
+.review-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.review-count {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.review-count.pending {
+  background: #4a3a18;
+  color: #ffd9a0;
+}
+
+.review-count.changes {
+  background: #4a2418;
+  color: #ffb59a;
+}
+
+.review-count.approved {
+  background: #1d3a26;
+  color: #b7f0c8;
+}
+
+.review-page-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.review-page-actions button,
+.review-item-actions button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.review-page-actions button:hover,
+.review-item-actions button:hover {
+  border-color: var(--accent);
+}
+
+.review-item-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+  padding-top: 1px;
+}
+
+.review-item-actions .review-approve {
+  border-color: #2f6b3a;
+  color: #b7f0c8;
+}
+
+.review-item-actions .review-approve:hover {
+  background: #1d3a26;
+  border-color: #3f8b4f;
+}
+
+.review-item-actions .review-reject {
+  border-color: #8a5a36;
+  color: #ffc9a0;
+}
+
+.review-item-actions .review-reject:hover {
+  background: #4a2f18;
+  border-color: #ff7a45;
+}
+
+.review-item.selected .find-snippet {
+  background: rgba(79, 140, 255, 0.16);
+  color: #9ec2ff;
+}
+
+.review-badge {
+  display: inline-block;
+  margin-left: 6px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.review-badge.pending {
+  background: #4a3a18;
+  color: #ffd9a0;
+}
+
+.review-badge.changes-requested {
+  background: #4a2418;
+  color: #ffb59a;
 }
 
 /* ---------- 导入方案确认弹窗 ---------- */

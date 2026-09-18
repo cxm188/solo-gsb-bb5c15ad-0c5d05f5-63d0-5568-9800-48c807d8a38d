@@ -176,7 +176,7 @@ export function applyRepeatPlan(
       skippedPages.push(preview.page);
       continue;
     }
-    const box: RedactionBox = { id: nextId(), ...rect };
+    const box: RedactionBox = { id: nextId(), ...rect, review: 'pending' };
     map[preview.page] = [...(map[preview.page] ?? []), box];
     addedByPage.set(preview.page, [...(addedByPage.get(preview.page) ?? []), rect]);
     appliedPages.push(preview.page);

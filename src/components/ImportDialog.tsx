@@ -27,7 +27,9 @@ export function ImportDialog({ scheme, currentBoxCount, onReplace, onMerge, onCa
         </p>
         <p className="modal-text dim">
           “替换”会用方案覆盖当前全部遮盖；“合并”会保留现有遮盖并追加方案内容
-          （按页及 0.01 点坐标容差去重）。整次导入只产生一条撤销记录。
+          （按页及 0.01 点坐标容差去重，重复框的复核状态取较严格的一方）。
+          复核状态随方案恢复；旧版（v1）方案的遮盖导入后一律标记为「待复核」。
+          整次导入只产生一条撤销记录。
         </p>
         <div className="modal-actions">
           <button onClick={onCancel}>取消</button>
